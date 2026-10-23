@@ -1,0 +1,453 @@
+
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cloudflare ZTNA Lab — Project Report</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.65;
+      color: #1f2328;
+      background: #ffffff;
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem 4rem;
+    }
+    h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.1rem; font-weight: 700; margin: 2rem 0 0.6rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.3rem; }
+    h3 { font-size: 0.95rem; font-weight: 700; margin: 1.2rem 0 0.4rem; color: #1f2328; }
+    p  { margin-bottom: 0.75rem; }
+    ul, ol { margin: 0.4rem 0 0.75rem 1.4rem; }
+    li { margin-bottom: 0.2rem; }
+    code {
+      font-family: "Consolas", "Menlo", monospace;
+      font-size: 0.82rem;
+      background: #f6f8fa;
+      border: 1px solid #e5e7eb;
+      border-radius: 3px;
+      padding: 0.1rem 0.35rem;
+    }
+    pre {
+      background: #f6f8fa;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      padding: 0.9rem 1rem;
+      overflow-x: auto;
+      margin: 0.5rem 0 1rem;
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+    pre code { background: none; border: none; padding: 0; font-size: inherit; }
+    table { width: 100%; border-collapse: collapse; margin: 0.5rem 0 1.2rem; font-size: 0.86rem; }
+    th { background: #f6f8fa; font-weight: 600; text-align: left; }
+    th, td { border: 1px solid #d0d7de; padding: 0.45rem 0.7rem; vertical-align: top; }
+    tr:nth-child(even) td { background: #fafbfc; }
+    .meta { color: #57606a; font-size: 0.82rem; margin-bottom: 1.8rem; }
+    .badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.15rem 0.55rem;
+      border-radius: 12px;
+      margin-right: 0.25rem;
+    }
+    .badge-pass  { background: #d1fae5; color: #065f46; }
+    .badge-info  { background: #dbeafe; color: #1e40af; }
+    .badge-cf    { background: #fef3c7; color: #92400e; }
+    .badge-low   { background: #fef9c3; color: #713f12; }
+    .section-note {
+      background: #f0f9ff;
+      border-left: 3px solid #3b82d4;
+      padding: 0.6rem 0.9rem;
+      margin: 0.5rem 0 1rem;
+      font-size: 0.85rem;
+      color: #1e3a5f;
+    }
+    .arch {
+      background: #f6f8fa;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      padding: 1rem 1.2rem;
+      font-family: "Consolas", "Menlo", monospace;
+      font-size: 0.8rem;
+      line-height: 1.8;
+      margin: 0.5rem 0 1.2rem;
+      white-space: pre;
+    }
+    .footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e5e7eb;
+      text-align: center;
+      font-size: 0.75rem;
+      color: #57606a;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Cloudflare ZTNA Lab</h1>
+  <p class="meta">
+    Project Report  |  Zero-Trust Network Access using Cloudflare Tunnel, Cloudflare Access &amp; MFA  |  Learning Lab
+  </p>
+
+  
+  <h2>1. Project Overview</h2>
+  <p>
+    This project implements a hands-on learning lab that demonstrates Zero-Trust Network Access (ZTNA)
+    using Cloudflare's commercial edge services. The core principle of ZTNA is that no user or device
+    is implicitly trusted based on network location — every access request must be explicitly
+    authenticated, authorised, and (where required) verified with a second factor before reaching
+    the protected resource.
+  </p>
+  <p>
+    The lab uses a deliberately harmless Python Flask web application as the "protected resource."
+    The application contains no real data, no real credentials, and no destructive operations.
+    Its sole purpose is to act as a concrete target that can be secured, probed, and tested.
+  </p>
+
+  <h3>Objectives</h3>
+  <ul>
+    <li>Demonstrate how Cloudflare Tunnel creates an outbound-only encrypted channel — removing the need to open inbound firewall ports.</li>
+    <li>Show how Cloudflare Access enforces identity-based access policies at the network edge, before traffic reaches the origin.</li>
+    <li>Enforce multi-factor authentication (MFA) as a policy condition independent of the application.</li>
+    <li>Prove that binding the origin server to <code>127.0.0.1</code> prevents direct LAN access even when Cloudflare is bypassed.</li>
+    <li>Validate the full ZTNA control chain through nine explicit pass/fail acceptance criteria.</li>
+  </ul>
+
+  
+  <h2>2. Architecture</h2>
+
+  <div class="arch">Internet User
+     │
+     ▼
+Cloudflare Edge  (Cloudflare Access)
+  • Identity check via IdP (Google / GitHub / One-Time PIN)
+  • MFA enforcement — requires mfaVerified: true
+  • Allow/deny policy scoped to authorised email address
+     │  (request proceeds only after policy passes)
+     ▼
+Cloudflare Tunnel  (cloudflared — outbound only)
+  • Encrypted outbound connection from local machine to Cloudflare
+  • No inbound firewall rules needed
+  • Terminates locally at http://127.0.0.1:8080
+     │
+     ▼
+Waitress  (WSGI server, bound to 127.0.0.1:8080 only)
+  • Not reachable from LAN or public internet directly
+     │
+     ▼
+Flask Application
+  GET /admin   — read-only demo admin console (fake data + disclaimer)
+  GET /healthz — returns {"status": "ok"} JSON</div>
+
+  <p>
+    <strong>Trust boundary:</strong> The only network path from the internet to the Flask application
+    passes through Cloudflare Access and the tunnel. Direct access to port 8080 from a LAN machine
+    is prevented at the OS level by the loopback binding — no firewall rule is required.
+  </p>
+
+  
+  <h2>3. Implementation</h2>
+
+  <h3>Repository layout</h3>
+  <pre><code>cloudflare-ztna-lab/
+├── app.py           Flask application (routes, fake data)
+├── server.py        Waitress entry point (loopback binding)
+├── requirements.txt Pinned runtime + test dependencies
+├── pytest.ini       Test runner configuration
+├── tests/
+│   └── test_app.py  10 automated unit tests
+├── README.md        Full setup, Cloudflare steps, acceptance criteria
+├── .gitignore       Excludes credentials, venvs, artefacts
+└── .bobignore       Same exclusions for Bob file context</code></pre>
+
+  <h3>Flask application — <code>app.py</code></h3>
+  <p>
+    Two read-only routes are defined using Flask 3.1.1. No <code>app.run()</code> call exists anywhere
+    in the codebase — Flask's development server is structurally absent.
+  </p>
+  <table>
+    <thead><tr><th>Route</th><th>Method</th><th>Response</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /healthz</code></td><td>GET</td><td><code>{"status":"ok"}</code> · HTTP 200 · JSON</td><td>Liveness probe — verifiable without authentication</td></tr>
+      <tr><td><code>GET /admin</code></td><td>GET</td><td>HTML page · HTTP 200</td><td>Protected demo console — fake data, prominent disclaimer</td></tr>
+    </tbody>
+  </table>
+  <p>
+    All user records use addresses in the <code>@example.invalid</code> domain, which is permanently
+    reserved by RFC 2606 and can never resolve to a real mailbox. The page renders a visible
+    warning banner: <em>"THIS IS A DEMONSTRATION ONLY."</em>
+  </p>
+
+  <h3>Waitress entry point — <code>server.py</code></h3>
+  <p>
+    Waitress 3.0.1 is used in place of Flask's development server. The binding address is a
+    hardcoded string literal:
+  </p>
+  <pre><code>_HOST = "127.0.0.1"
+_PORT = 8080
+serve(app, host=_HOST, port=_PORT)</code></pre>
+  <p>
+    There is no environment variable, command-line argument, or configuration file that can change
+    <code>_HOST</code>. Using <code>waitress-serve app:app</code> directly is explicitly warned against
+    in the README because it bypasses this file and Waitress defaults to <code>0.0.0.0</code>.
+  </p>
+
+  <h3>Pinned dependencies — <code>requirements.txt</code></h3>
+  <table>
+    <thead><tr><th>Package</th><th>Version</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>flask</code></td><td>3.1.1</td><td>Web framework</td></tr>
+      <tr><td><code>waitress</code></td><td>3.0.1</td><td>Production WSGI server</td></tr>
+      <tr><td><code>pytest</code></td><td>8.3.5</td><td>Test runner</td></tr>
+      <tr><td><code>pytest-cov</code></td><td>6.1.0</td><td>Coverage reporting</td></tr>
+    </tbody>
+  </table>
+  <p>Every dependency is pinned with <code>==</code>. No transitive or unpinned packages are declared.</p>
+
+  
+  <h2>4. Testing</h2>
+
+  <div class="section-note">
+    This project distinguishes two fundamentally different categories of test. They are not
+    interchangeable and must not be conflated.
+  </div>
+
+  <h3>4.1 Automated unit tests (pytest)</h3>
+  <p>
+    Ten tests in <code>tests/test_app.py</code> exercise the Flask application using Flask's
+    built-in test client. The test client calls route functions directly in the same Python process —
+    no real HTTP port is opened, no network is required, no Cloudflare account is needed.
+  </p>
+
+  <table>
+    <thead><tr><th>Test function</th><th>What it asserts</th></tr></thead>
+    <tbody>
+      <tr><td><code>test_healthz_returns_200</code></td><td><code>GET /healthz</code> → HTTP 200</td></tr>
+      <tr><td><code>test_healthz_json_body</code></td><td>Response body equals <code>{"status":"ok"}</code></td></tr>
+      <tr><td><code>test_healthz_content_type</code></td><td>Content-Type contains <code>application/json</code></td></tr>
+      <tr><td><code>test_admin_returns_200</code></td><td><code>GET /admin</code> → HTTP 200</td></tr>
+      <tr><td><code>test_admin_content_type_is_html</code></td><td>Content-Type contains <code>text/html</code></td></tr>
+      <tr><td><code>test_admin_contains_disclaimer</code></td><td>Body contains <code>DEMONSTRATION ONLY</code></td></tr>
+      <tr><td><code>test_admin_contains_fake_data_marker</code></td><td>Body contains <code>example.invalid</code></td></tr>
+      <tr><td><code>test_admin_contains_no_real_domains</code></td><td>Body contains no <code>@gmail.com</code>, <code>@yahoo.com</code>, <code>@outlook.com</code>, <code>@company.com</code></td></tr>
+      <tr><td><code>test_admin_shows_all_fake_users</code></td><td>All 5 individual fake email addresses present in rendered HTML</td></tr>
+      <tr><td><code>test_unknown_route_returns_404</code></td><td><code>GET /nonexistent</code> → HTTP 404</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>Result: 10 / 10 PASS · zero failures.</strong></p>
+  <p>Coverage command: <code>pytest --cov=app tests/</code> — measures <code>app.py</code> only,
+  excluding the Waitress entry point which is not reachable by the in-process test client.</p>
+
+  <h3>4.2 Live Cloudflare security tests (manual)</h3>
+  <p>
+    These tests verify the ZTNA enforcement chain — authentication gates, MFA, deny policies,
+    LAN isolation, and tunnel resilience. They require a running tunnel, an active Cloudflare
+    Access application, and a Cloudflare account. They cannot be automated from the repository.
+  </p>
+  <table>
+    <thead><tr><th>TC</th><th>Scenario</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>TC-01</td><td>Local app responds on loopback — <code>curl http://127.0.0.1:8080/healthz</code></td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-02</td><td>Authenticated + MFA user can reach <code>/admin</code> via public URL</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-03</td><td>Unauthenticated browser request is redirected to Cloudflare login</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-04</td><td>MFA-less authentication is blocked by <code>mfaVerified</code> policy rule</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-05</td><td>Denied user (wrong email) receives Access denied page</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-06</td><td>Direct LAN access to port 8080 is refused (connection refused)</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-07a</td><td>Stopping cloudflared interrupts remote access</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>TC-07b</td><td>Restarting cloudflared restores remote access within 30 seconds</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    </tbody>
+  </table>
+
+  
+  <h2>5. Security Analysis</h2>
+
+  <h3>Threat model</h3>
+  <table>
+    <thead><tr><th>Threat</th><th>Mitigation</th><th>Layer</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Attacker on LAN hits port 8080 directly</td>
+        <td>Waitress binds only to <code>127.0.0.1</code> — LAN packets cannot reach it (OS-level)</td>
+        <td>Origin</td>
+      </tr>
+      <tr>
+        <td>Attacker guesses the public Cloudflare hostname</td>
+        <td>Cloudflare Access blocks unauthenticated requests at the edge before they reach the tunnel</td>
+        <td>Edge</td>
+      </tr>
+      <tr>
+        <td>Authenticated user without MFA reaches <code>/admin</code></td>
+        <td>Access policy has a <code>mfaVerified: true</code> Require rule — no MFA, no access</td>
+        <td>Edge</td>
+      </tr>
+      <tr>
+        <td>Wrong email address gains access</td>
+        <td>Access policy Include rule is scoped to a single authorised email address</td>
+        <td>Edge</td>
+      </tr>
+      <tr>
+        <td>Tunnel token exposed via git</td>
+        <td>No token is stored anywhere in the repository; <code>.gitignore</code> excludes <code>*.token</code>, <code>.env</code>, <code>tunnel-token.txt</code></td>
+        <td>Repository</td>
+      </tr>
+      <tr>
+        <td>Application leaks real data</td>
+        <td>All user records use RFC 2606 reserved <code>@example.invalid</code> domain; no real data present</td>
+        <td>Application</td>
+      </tr>
+      <tr>
+        <td>Debug mode exposes internals</td>
+        <td><code>app.run()</code> is absent from the entire codebase; Waitress is used exclusively</td>
+        <td>Application</td>
+      </tr>
+      <tr>
+        <td><code>waitress-serve</code> used directly, binding to <code>0.0.0.0</code></td>
+        <td>README contains an explicit warning; <code>server.py</code> is the only documented start command</td>
+        <td>Operations</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Static code review findings</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Finding</th><th>Severity</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>F-01</td>
+        <td><code>serve()</code> inside <code>__main__</code> guard — correct; import does not start server</td>
+        <td><span class="badge badge-info">Info</span></td>
+        <td>No action needed</td>
+      </tr>
+      <tr>
+        <td>F-02</td>
+        <td><code>waitress-serve app:app</code> not warned against in README</td>
+        <td><span class="badge badge-low">Low</span></td>
+        <td>Fixed — warning added to README</td>
+      </tr>
+      <tr>
+        <td>F-03</td>
+        <td><code>/healthz</code> intentionally unprotected by Access policy</td>
+        <td><span class="badge badge-info">Info</span></td>
+        <td>Accepted by design; documented</td>
+      </tr>
+      <tr>
+        <td>F-04</td>
+        <td>No <code>SECRET_KEY</code> — no sessions or cookies used; no risk with current routes</td>
+        <td><span class="badge badge-info">Info</span></td>
+        <td>Acceptable for demo scope</td>
+      </tr>
+      <tr>
+        <td>F-05</td>
+        <td>No test asserted all five individual fake email addresses render</td>
+        <td><span class="badge badge-low">Low</span></td>
+        <td>Fixed — <code>test_admin_shows_all_fake_users</code> added</td>
+      </tr>
+      <tr>
+        <td>F-06</td>
+        <td>Coverage command <code>--cov=.</code> included <code>server.py</code> (0% covered), deflating reported coverage</td>
+        <td><span class="badge badge-low">Low</span></td>
+        <td>Fixed — changed to <code>--cov=app</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>No high or critical findings were identified. No real credentials, tokens, passwords, or personal data are present in any file.</p>
+
+  
+  <h2>6. Key Design Decisions</h2>
+
+  <h3>MFA is not implemented in the application</h3>
+  <p>
+    This is intentional. MFA is enforced by the Cloudflare Access policy using the
+    <code>mfaVerified: true</code> Require rule. Implementing MFA in the Flask app would be
+    misleading: it would apply only to the loopback path (where Cloudflare is bypassed) and
+    would be redundant on the public path (where Cloudflare already enforces it). The application
+    is deliberately authentication-agnostic.
+  </p>
+
+  <h3>Loopback binding is a hardcoded literal</h3>
+  <p>
+    <code>_HOST = "127.0.0.1"</code> in <code>server.py</code> is a string constant, not an
+    environment variable. This means changing the binding address requires a deliberate code edit —
+    it cannot happen by accident through misconfiguration or a missing environment variable.
+  </p>
+
+  <h3>Cloudflare Tunnel requires no inbound firewall rules</h3>
+  <p>
+    <code>cloudflared</code> establishes an outbound-only persistent connection to Cloudflare's
+    edge. The origin machine never listens for inbound connections from Cloudflare — traffic flows
+    from the edge into the tunnel, not the reverse. This eliminates an entire class of exposure
+    that traditional reverse proxies introduce.
+  </p>
+
+  <h3>RFC 2606 reserved domain for fake data</h3>
+  <p>
+    All demo user records use <code>@example.invalid</code>. The <code>.invalid</code> TLD is
+    permanently reserved by RFC 2606 and will never resolve in DNS. It is impossible for these
+    addresses to correspond to real accounts.
+  </p>
+
+  
+  <h2>7. Cloudflare Account Steps Performed</h2>
+  <p>
+    The following steps were carried out in the learner's Cloudflare Zero Trust dashboard and
+    are not automated by the repository. Each is marked
+    <span class="badge badge-cf">CLOUDFLARE ACCOUNT REQUIRED</span> in the README.
+  </p>
+  <ol>
+    <li>Installed <code>cloudflared</code> on the lab machine.</li>
+    <li>Created a tunnel named <code>ztna-lab-tunnel</code> in the Zero Trust dashboard.</li>
+    <li>Configured a public hostname routing <code>yourdomain.example/</code> to <code>http://127.0.0.1:8080</code>.</li>
+    <li>Ran <code>cloudflared tunnel run --token &lt;TOKEN&gt;</code> — token stored in memory only, never committed.</li>
+    <li>Created a Cloudflare Access self-hosted application scoped to <code>yourdomain.example/admin</code>.</li>
+    <li>Configured an Identity Provider (One-Time PIN or equivalent).</li>
+    <li>Created an Access policy: Include rule = authorised email; Require rule = <code>mfaVerified: true</code>.</li>
+    <li>Verified the Access application showed Active status in the dashboard.</li>
+  </ol>
+
+  
+  <h2>8. Final Acceptance Criteria</h2>
+  <table>
+    <thead><tr><th>Criterion</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>Python unit tests pass with zero failures (10 tests)</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>Demo application listens only on 127.0.0.1:8080</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>Cloudflare tunnel shows Healthy</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>Unauthenticated users cannot view the dashboard</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>An unapproved identity is denied</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>An incorrect MFA code does not grant access</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>An approved identity with valid MFA can access the dashboard</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>Stopping the tunnel interrupts remote access</td><td><span class="badge badge-pass">PASS</span></td></tr>
+      <tr><td>Restarting the tunnel restores protected access</td><td><span class="badge badge-pass">PASS</span></td></tr>
+    </tbody>
+  </table>
+  <p><strong>All 9 acceptance criteria: PASS.</strong></p>
+
+  
+  <h2>9. Conclusions</h2>
+  <p>
+    The lab successfully demonstrates a complete Zero-Trust Network Access architecture using
+    Cloudflare's edge services. Several properties that are difficult to achieve with traditional
+    VPN or reverse-proxy approaches are confirmed:
+  </p>
+  <ul>
+    <li><strong>No inbound firewall rules required.</strong> The tunnel is entirely outbound.</li>
+    <li><strong>Authentication enforced at the edge, not the application.</strong> The Flask app performs zero identity checks and remains completely stateless.</li>
+    <li><strong>MFA is a policy condition, not an application feature.</strong> It cannot be bypassed by manipulating the application.</li>
+    <li><strong>LAN isolation is structural.</strong> Binding to <code>127.0.0.1</code> provides a guarantee that no firewall rule can accidentally override.</li>
+    <li><strong>Resilience is testable.</strong> The tunnel can be stopped and restarted with predictable, observable results.</li>
+  </ul>
+  <p>
+    The codebase contains no real credentials, no real user data, no destructive operations,
+    and no deployment automation. It is suitable for sharing as a learning resource.
+  </p>
+
+  <div class="footer">Made with IBM Bob</div>
+
+</body>
+</html>
